@@ -366,6 +366,92 @@
     return { events: events, skipped: skipped };
   }
 
+  /* ---------------- 保存した「マイ アクティビティ」ページ ---------------- */
+
+  /* Takeout がうまく書き出せないときの逃げ道として、ブラウザの「名前を付けて保存」で
+     残した myactivity.google.com のページも読めるようにする。
+
+     Takeout の HTML とは別物で、1 件が c-wiz ブロック。大きな違いは
+     **時刻が「23:01」と分までしか無い**こと。秒が無いと Takeout 側の同じ視聴と
+     鍵が一致しないので、イベントに coarse: true を立てて、あとで分単位で
+     突き合わせる（Parser.merge を参照）。 */
+
+  var MA_MARK = 'class="xDtZAf"';
+  var RE_MA_DATE = /data-date="(\d{4})(\d{2})(\d{2})"/;
+  var RE_MA_TIME = /class="H3Q9vf[^"]*">\s*(\d{1,2}):(\d{2})/;
+  var RE_MA_SERVICE = /class="hJ7x8b">([^<]*)</;
+  var RE_MA_VIDEO = /<a[^>]+href="([^"]+)"[^>]*class="l8sGWb"[^>]*>([\s\S]*?)<\/a>/;
+  var RE_MA_CHANNEL = /class="SiEggd"[\s\S]{0,400}?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/;
+
+  function looksLikeMyActivityPage(text) {
+    return text.indexOf(MA_MARK) >= 0 && text.indexOf('data-date="') >= 0;
+  }
+
+  async function fromMyActivityPage(text, onProgress) {
+    var events = [];
+    var skipped = { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 };
+    var pos = text.indexOf(MA_MARK);
+    var total = text.length;
+    var sinceYield = 0;
+
+    while (pos >= 0) {
+      var next = text.indexOf(MA_MARK, pos + MA_MARK.length);
+      var block = text.slice(pos, next < 0 ? text.length : next);
+      pos = next;
+
+      var svc = RE_MA_SERVICE.exec(block);
+      var dm = RE_MA_DATE.exec(block);
+      var tm = RE_MA_TIME.exec(block);
+
+      if (svc && svc[1].indexOf('YouTube') < 0) {
+        skipped.notYouTube++;
+      } else if (AD_MARKER.test(block) || /広告/.test(block)) {
+        skipped.ads++;
+      } else if (/を検索しました/.test(block) || /\/results\?/.test(block)) {
+        skipped.search++;
+      } else if (!dm || !tm) {
+        skipped.noTime++;
+      } else if (block.indexOf('を視聴しました') < 0) {
+        skipped.otherAction++;
+      } else {
+        var vid = RE_MA_VIDEO.exec(block);
+        if (!vid) {
+          skipped.other++;
+        } else {
+          var ch = RE_MA_CHANNEL.exec(block);
+          var title = stripTags(vid[2]);
+
+          // このページには「Google 広告から」の表示が無い（詳細を開かないと出ない）
+          // ので、広告を印で見分けられない。代わりに、同じアカウントの Takeout
+          // 90,914 件で確かめた次の関係を使う。
+          //   チャンネル有・タイトル有 → 広告 0.0%（0 / 80,005）
+          //   チャンネル無・タイトル有 → 広告 100%（3,368 / 3,368）
+          //   チャンネル無・タイトルが URL → 広告 18.7%（判別できない）
+          // 「チャンネルが無いのにタイトルがある」= 広告として落とす。
+          // タイトルが URL のものは削除・非公開の動画が大半なので残す。
+          if (!ch && !/^https?:\/\//.test(title)) {
+            skipped.ads++;
+          } else {
+            // 保存したページに時差の情報は無い。表示された時刻＝保存した人の
+            // ローカル時刻なので、そのままローカル時刻として組み立てる。
+            var t = new Date(+dm[1], +dm[2] - 1, +dm[3], +tm[1], +tm[2], 0, 0).getTime();
+            var ev = makeEvent(t, title, decodeEntities(vid[1]),
+              ch ? stripTags(ch[2]) : null, ch ? decodeEntities(ch[1]) : null, false);
+            ev.coarse = true;   // 秒が無い
+            events.push(ev);
+          }
+        }
+      }
+
+      if (++sinceYield >= 2000) {
+        sinceYield = 0;
+        if (onProgress) onProgress((pos < 0 ? total : pos) / total);
+        await U.nextFrame();
+      }
+    }
+    return { events: events, skipped: skipped };
+  }
+
   /* ---------------- 統合ファイル（このアプリが書き出す形式） ---------------- */
 
   var MERGED_FORMAT = 'yt-history-merged';
@@ -396,6 +482,16 @@
     return (e.videoId ? 'v:' + e.videoId : e.key) + '|' + Math.floor(e.t / 1000);
   }
 
+  // 分までしか時刻が無いソースを、秒まであるソースと突き合わせるための鍵
+  function minuteKey(e) {
+    return (e.videoId ? 'v:' + e.videoId : e.key) + '|' + Math.floor(e.t / 60000);
+  }
+
+  function isCoarseList(src) {
+    var ev = src.events || [];
+    return ev.length > 0 && !!ev[0].coarse;
+  }
+
   // 同じ視聴が複数のファイルにある場合、情報が多い方を残す。
   // マイアクティビティ側はチャンネル名が入っていない行が 1 割ほどある。
   function score(e) {
@@ -409,27 +505,45 @@
    */
   Parser.merge = function (lists) {
     var map = new Map();
+    var minSet = new Set();   // 秒まである視聴の「動画＋分」
     var stats = [];
 
-    lists.forEach(function (src) {
+    // 分までしか時刻が無いソース（保存したマイ アクティビティのページ）は
+    // 秒まであるソースと鍵が一致しない。精度の高い方を先に入れておき、
+    // 同じ分に既に入っている視聴は重複として落とす。
+    var ordered = lists.map(function (l, i) { return { src: l, i: i, coarse: isCoarseList(l) }; });
+    ordered.sort(function (a, b) { return (a.coarse ? 1 : 0) - (b.coarse ? 1 : 0) || a.i - b.i; });
+
+    ordered.forEach(function (o) {
+      var events = o.src.events || [];
       var before = map.size;
-      var events = src.events || [];
       for (var i = 0; i < events.length; i++) {
         var e = events[i];
+        // 秒まである同じ視聴が既にあるなら、分だけの記録は捨てる
+        if (e.coarse && minSet.has(minuteKey(e))) continue;
         var k = dedupeKey(e);
         var cur = map.get(k);
-        if (cur === undefined) map.set(k, e);
-        else if (score(e) > score(cur)) map.set(k, e);
+        if (cur === undefined) {
+          map.set(k, e);
+          if (!e.coarse) minSet.add(minuteKey(e));
+        } else if (score(e) > score(cur)) {
+          map.set(k, e);
+        }
       }
       var added = map.size - before;
-      stats.push({
-        name: src.name,
+      o.stat = {
+        name: o.src.name,
         count: events.length,
         added: added,
         duplicates: events.length - added,
-        skipped: src.skipped || null
-      });
+        coarse: o.coarse,
+        skipped: o.src.skipped || null
+      };
     });
+
+    // 表示は読み込んだ順に戻す
+    ordered.slice().sort(function (a, b) { return a.i - b.i; })
+      .forEach(function (o) { stats.push(o.stat); });
 
     var events = [];
     map.forEach(function (v) { events.push(v); });
@@ -478,7 +592,13 @@
 
     var looksJson = /\.json$/i.test(name) || /^\s*[[{]/.test(text.slice(0, 200));
     if (!looksJson) {
-      return await fromHtml(text, function (r) { report(0.45 + r * 0.5, '「' + name + '」を解析しています…'); });
+      var step = function (r) { report(0.45 + r * 0.5, '「' + name + '」を解析しています…'); };
+      // Takeout の HTML は outer-cell。それが無くて c-wiz なら、
+      // ブラウザで保存した「マイ アクティビティ」のページ。
+      if (text.indexOf('outer-cell') < 0 && looksLikeMyActivityPage(text)) {
+        return await fromMyActivityPage(text, step);
+      }
+      return await fromHtml(text, step);
     }
 
     var data;
