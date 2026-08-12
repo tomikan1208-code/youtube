@@ -214,6 +214,8 @@ select.input { cursor: pointer; }
   font-size: 13.5px;
   border: 1px solid var(--border);
   background: var(--surface-2);
+  /* 複数ファイルを読んだときの注意書きは改行で区切って出す */
+  white-space: pre-line;
 }
 .notice--error { border-color: #d03b3b; color: var(--text-primary); }
 .notice--error::before { content: "⚠ "; }

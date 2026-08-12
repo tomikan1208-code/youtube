@@ -16,7 +16,6 @@
       var e = events[i];
       if (e.t < from || e.t > to) continue;
       if (!opt.music && e.music) continue;
-      if (!opt.ads && e.ad) continue;
       if (q) {
         var hay = e.title.toLowerCase() + ' ' + (e.ch ? e.ch.toLowerCase() : '');
         if (hay.indexOf(q) < 0) continue;
@@ -58,7 +57,7 @@
     var heat = [];
     for (var w = 0; w < 7; w++) heat.push(new Array(24).fill(0));
 
-    var musicPlays = 0, adPlays = 0, shortsPlays = 0;
+    var musicPlays = 0, shortsPlays = 0;
 
     for (var i = 0; i < events.length; i++) {
       var e = events[i];
@@ -118,7 +117,6 @@
       heat[d.getDay()][d.getHours()]++;
 
       if (e.music) musicPlays++;
-      if (e.ad) adPlays++;
       if (e.url && e.url.indexOf('/shorts/') >= 0) shortsPlays++;
     }
 
@@ -210,7 +208,6 @@
         perDay: spanDays ? total / spanDays : 0,
         perActiveDay: dayCount.size ? total / dayCount.size : 0,
         musicPlays: musicPlays,
-        adPlays: adPlays,
         shortsPlays: shortsPlays,
         first: firstT,
         last: lastT,

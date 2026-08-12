@@ -583,8 +583,7 @@
                 n === 1
                   ? h('span', { class: 'pill pill--first' }, 'はじめて見た')
                   : h('span', { class: 'pill' }, n + ' 回目'),
-                ev.music ? h('span', { class: 'pill pill--music' }, 'Music') : null,
-                ev.ad ? h('span', { class: 'pill' }, '広告') : null))));
+                ev.music ? h('span', { class: 'pill pill--music' }, 'Music') : null))));
         })(e, nth[j]);
       }
 
