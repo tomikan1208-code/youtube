@@ -11,9 +11,21 @@
   function monthPoint(key, values) {
     var isJan = key.slice(5) === '01';
     return {
+      key: key,
       label: U.fmtMonth(key),
       short: isJan ? key.slice(0, 4) + '年' : U.fmtMonthShort(key),
       anchor: isJan,
+      values: values
+    };
+  }
+
+  // 日ごとのグラフ用。ラベルが混まないよう 1 日と 5 日刻みだけ数字を出す。
+  function dayPoint(row, values) {
+    return {
+      key: row.key,
+      label: U.fmtDateW(new Date(row.key + 'T00:00:00').getTime()),
+      short: String(row.day),
+      anchor: row.day === 1,
       values: values
     };
   }
@@ -198,7 +210,9 @@
       statTile('よく見る時間帯', an.peakHour + '時台', '',
         U.int(an.hourTotals[an.peakHour]) + ' 回'),
       t.musicPlays ? statTile('YouTube Music', U.int(t.musicPlays), '回',
-        '全体の ' + U.pct(t.musicPlays / t.plays)) : null));
+        '全体の ' + U.pct(t.musicPlays / t.plays)) : null,
+      t.shortsPlays ? statTile('ショート動画', U.int(t.shortsPlays), '回',
+        '全体の ' + U.pct(t.shortsPlays / t.plays) + '（#shorts タグで判定）') : null));
 
     /* 月別：初めて見た / もう一度見た */
     var months = an.months;
@@ -208,13 +222,15 @@
     ];
     root.appendChild(Charts.figure({
       title: '月ごとの再生回数',
-      sub: '「初めて見た」＝その動画をはじめて再生した回。積み上げの合計がその月の総再生回数。',
+      sub: '「初めて見た」＝その動画をはじめて再生した回。積み上げの合計がその月の総再生回数。' +
+           '棒を選ぶと、その月の日ごとの内訳を表示します。',
       legend: series,
       draw: Charts.stackedColumns({
         title: '月ごとの再生回数',
         data: months.map(function (m) { return monthPoint(m.key, [m.repeat, m.discovery]); }),
         series: series,
-        height: 280
+        height: 280,
+        onSelect: function (d) { app.openMonth(d.key); }
       }),
       table: {
         head: ['月', 'もう一度見た', '初めて見た', '合計'],
@@ -583,8 +599,7 @@
                 n === 1
                   ? h('span', { class: 'pill pill--first' }, 'はじめて見た')
                   : h('span', { class: 'pill' }, n + ' 回目'),
-                ev.music ? h('span', { class: 'pill pill--music' }, 'Music') : null,
-                ev.ad ? h('span', { class: 'pill' }, '広告') : null))));
+                ev.music ? h('span', { class: 'pill pill--music' }, 'Music') : null))));
         })(e, nth[j]);
       }
 
@@ -620,6 +635,96 @@
     root.appendChild(more);
     render();
     return root;
+  };
+
+  /* ================= 詳細（月） ================= */
+
+  // 月ごとの棒を選んだときに出す、その月の日ごとの内訳
+  Views.monthDetail = function (an, monthKey, app) {
+    var box = h('div');
+    var md = Analytics.monthDays(an, monthKey);
+    var lastDay = md.days.length;
+
+    box.appendChild(h('div', { class: 'kv' },
+      h('div', { class: 'kv__item' }, h('div', { class: 'kv__k' }, '再生回数'),
+        h('div', { class: 'kv__v' }, U.int(md.total), h('small', null, ' 回'))),
+      h('div', { class: 'kv__item' }, h('div', { class: 'kv__k' }, '初めて見た'),
+        h('div', { class: 'kv__v' }, U.int(md.discovery), h('small', null, ' 回'))),
+      h('div', { class: 'kv__item' }, h('div', { class: 'kv__k' }, 'もう一度見た'),
+        h('div', { class: 'kv__v' }, U.int(md.repeat), h('small', null, ' 回'))),
+      h('div', { class: 'kv__item' }, h('div', { class: 'kv__k' }, '見た日数'),
+        h('div', { class: 'kv__v' }, U.int(md.activeDays),
+          h('small', null, ' / ' + lastDay + ' 日'))),
+      h('div', { class: 'kv__item' }, h('div', { class: 'kv__k' }, '最も見た日'),
+        h('div', { class: 'kv__v' }, md.best ? md.best.day + '日' : '—',
+          md.best ? h('small', null, ' ' + U.int(md.best.total) + ' 回') : null))));
+
+    if (!md.total) {
+      box.appendChild(h('p', { class: 'notice' }, 'この月の記録はありません。'));
+      return box;
+    }
+
+    var series = [
+      { name: 'もう一度見た', color: U.cssVar('--series-1') },
+      { name: '初めて見た', color: U.cssVar('--series-2') }
+    ];
+
+    box.appendChild(h('div', { class: 'detail-title' }, '日ごとの再生回数'));
+    box.appendChild(Charts.figure({
+      sub: '見ていない日は 0 のまま並べています。',
+      legend: series,
+      draw: Charts.stackedColumns({
+        title: U.fmtMonth(monthKey) + ' の日ごとの再生回数',
+        data: md.days.map(function (r) { return dayPoint(r, [r.repeat, r.discovery]); }),
+        series: series,
+        height: 240
+      }),
+      table: {
+        head: ['日', 'もう一度見た', '初めて見た', '合計'],
+        rows: md.days.map(function (r) {
+          return [r.day + '日', U.int(r.repeat), U.int(r.discovery), U.int(r.total)];
+        })
+      }
+    }));
+
+    /* その月によく見たチャンネル・動画 */
+    var from = new Date(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)) - 1, 1).getTime();
+    var to = new Date(Number(monthKey.slice(0, 4)), Number(monthKey.slice(5, 7)), 0, 23, 59, 59, 999).getTime();
+    var chCount = new Map();
+    var vidCount = new Map();
+    for (var i = 0; i < an.events.length; i++) {
+      var e = an.events[i];
+      if (e.t < from || e.t > to) continue;
+      var cn = e.ch || '（不明なチャンネル）';
+      chCount.set(cn, (chCount.get(cn) || 0) + 1);
+      var v = vidCount.get(e.key);
+      if (!v) { v = { title: e.title, ch: e.ch, count: 0 }; vidCount.set(e.key, v); }
+      v.count++;
+    }
+
+    function topList(title, rows) {
+      if (!rows.length) return;
+      box.appendChild(h('div', { class: 'detail-title' }, title));
+      box.appendChild(h('ul', { class: 'watch-list' }, rows.map(function (r, n) {
+        return h('li', null,
+          h('span', { class: 'watch-list__n' }, (n + 1) + '位'),
+          h('span', null, r.name),
+          h('span', { class: 'watch-list__gap' }, U.int(r.count) + ' 回'));
+      })));
+    }
+
+    topList('この月によく見たチャンネル',
+      Array.from(chCount.entries())
+        .map(function (p) { return { name: p[0], count: p[1] }; })
+        .sort(function (a, b) { return b.count - a.count; }).slice(0, 10));
+
+    topList('この月によく見た動画',
+      Array.from(vidCount.values())
+        .filter(function (v) { return v.count > 1; })
+        .map(function (v) { return { name: v.title, count: v.count }; })
+        .sort(function (a, b) { return b.count - a.count; }).slice(0, 10));
+
+    return box;
   };
 
   /* ================= 詳細（動画） ================= */

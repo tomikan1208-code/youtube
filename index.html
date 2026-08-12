@@ -18,6 +18,9 @@
     </div>
     <div class="app-header__actions">
       <span id="source-label" class="source-label" hidden></span>
+      <button type="button" id="btn-add" class="btn btn--ghost" hidden>ファイルを追加</button>
+      <input type="file" id="add-input" accept=".json,.html,.htm,.txt,.zip" multiple hidden>
+      <button type="button" id="btn-export" class="btn btn--ghost" hidden>統合データを書き出す</button>
       <button type="button" id="btn-theme" class="btn btn--ghost" aria-label="配色を切り替える" title="配色を切り替える">
         <span class="btn__icon" aria-hidden="true">◐</span>
       </button>
@@ -38,11 +41,12 @@
 
       <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-hint">
         <div class="dropzone__icon" aria-hidden="true">＋</div>
-        <div class="dropzone__main">ファイルをドロップ、またはクリックして選択</div>
+        <div class="dropzone__main">ファイルをまとめてドロップ、またはクリックして選択</div>
         <div id="dropzone-hint" class="dropzone__hint">
-          <code>watch-history.json</code> / <code>再生履歴.html</code> / Takeout の <code>.zip</code> に対応
+          <code>watch-history.json</code> / <code>再生履歴.html</code> / <code>マイアクティビティ.html</code> /
+          Takeout の <code>.zip</code> に対応。<b>複数まとめて選ぶと、重複を除いて 1 つにまとまります。</b>
         </div>
-        <input type="file" id="file-input" accept=".json,.html,.htm,.zip" hidden>
+        <input type="file" id="file-input" accept=".json,.html,.htm,.txt,.zip" multiple hidden>
       </div>
 
       <div id="import-progress" class="progress" hidden>
@@ -51,6 +55,7 @@
       </div>
 
       <p id="import-error" class="notice notice--error" hidden></p>
+      <p id="import-notice" class="notice" hidden></p>
 
       <div class="import__alt">
         <button type="button" id="btn-demo" class="btn btn--quiet">サンプルデータで試す</button>
@@ -67,12 +72,25 @@
           <span>このブラウザに保存する</span>
         </label>
 
+        <h2 class="import__notes-title">複数のエクスポートをまとめる</h2>
+        <p>
+          YouTube の再生履歴は一定期間で消えていくため、<b>1 回のエクスポートには数か月分しか入っていません</b>。
+          時期の違うエクスポートを複数まとめて読み込ませると、<b>同じ視聴（動画 ID と秒単位の時刻が一致するもの）を
+          1 件に畳んだうえで</b>、全期間をつないだ 1 つの記録になります。
+        </p>
+        <p>
+          まとめた結果は「統合データを書き出す」で 1 本の JSON として保存できます。
+          次からは <b>その統合 JSON と新しいエクスポートの 2 つだけ</b>を読み込ませれば済みます。
+          <b>広告（「Google 広告から」の記録）は視聴ではないので、読み込む時点で除外します。</b>
+        </p>
+
         <h2 class="import__notes-title">履歴の書き出し方</h2>
         <ol class="steps">
           <li><a href="https://takeout.google.com/" target="_blank" rel="noopener noreferrer">Google Takeout</a> を開く</li>
           <li>「選択をすべて解除」してから <b>YouTube と YouTube Music</b> だけを選ぶ</li>
-          <li>「含めるデータの選択」で <b>履歴</b> のみに絞り、形式を <b>JSON</b> にすると解析が速く正確です</li>
+          <li>「含めるデータの選択」で <b>履歴</b> のみに絞る（動画などを含めると zip が数 GB になります）。形式を <b>JSON</b> にすると解析が速く正確です</li>
           <li>書き出した zip、または中の <code>履歴/再生履歴.json</code> をここに読み込ませる</li>
+          <li><b>保持期間は年々短くなっています。3 か月に 1 回は書き出して、古いファイルも消さずに残してください。</b></li>
         </ol>
       </div>
     </div>
@@ -108,7 +126,7 @@
         </div>
         <div class="field field--checks">
           <label class="check"><input type="checkbox" id="f-music" checked><span>YouTube Music を含む</span></label>
-          <label class="check"><input type="checkbox" id="f-ads"><span>広告を含む</span></label>
+          <label class="check" title="Takeout はショート動画を通常の動画と同じ形式で記録するため、タイトルの #shorts タグで判定しています。タグの無いショートは判別できません。"><input type="checkbox" id="f-shorts" checked><span>ショート動画を含む</span></label>
         </div>
       </div>
       <div class="filterbar__summary" id="filter-summary"></div>

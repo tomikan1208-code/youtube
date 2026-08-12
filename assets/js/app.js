@@ -15,7 +15,7 @@
       to: null,
       q: '',
       music: true,
-      ads: false,
+      shorts: true,
       dedupe: 300000
     }
   };
@@ -54,13 +54,51 @@
     el.progress.hidden = true;
   }
 
-  async function handleFile(file) {
+  function showNotice(msg) {
+    el.notice.hidden = false;
+    el.notice.textContent = msg;
+  }
+
+  /**
+   * @param {FileList|File[]} files
+   * @param {boolean} append 既に読み込んだデータに足すか（false なら置き換え）
+   */
+  async function handleFiles(files, append) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) return;
+
     el.error.hidden = true;
+    el.notice.hidden = true;
     showProgress(0.02, '読み込みを開始しています…');
     try {
-      var result = await Parser.loadFile(file, showProgress);
+      var result = await Parser.loadFiles(list, showProgress);
+
+      // 既存データがある場合は置き換えずに統合する
+      if (append && state.events.length) {
+        var merged = Parser.merge([
+          { name: '読み込み済みのデータ', events: state.events },
+          { name: result.meta.sourceName, events: result.events }
+        ]);
+        var added = merged.sources[1].added;
+        result = {
+          events: merged.events,
+          meta: {
+            sourceName: (state.meta && state.meta.sourceName ? state.meta.sourceName + '、' : '') + result.meta.sourceName,
+            sources: (state.meta && state.meta.sources ? state.meta.sources : []).concat(result.meta.sources),
+            importedAt: Date.now(),
+            skipped: result.meta.skipped,
+            warnings: result.meta.warnings
+          }
+        };
+        showNotice('追加で ' + U.int(added) + ' 件が増えました（重複を除いて合計 ' + U.int(merged.events.length) + ' 件）');
+      }
+
       showProgress(1, '完了');
       await adopt(result, el.persist.checked);
+
+      if (result.meta.warnings && result.meta.warnings.length) {
+        showNotice(result.meta.warnings.join('\n'));
+      }
     } catch (err) {
       console.error(err);
       showError(err && err.message ? err.message : '読み込みに失敗しました');
@@ -81,14 +119,42 @@
     enterApp();
   }
 
+  /* ---- 統合データの書き出し ---- */
+
+  function exportMerged() {
+    if (!state.events.length) return;
+    var payload = Parser.buildMergedFile(state.events, (state.meta && state.meta.sources) || []);
+    var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    var url = URL.createObjectURL(blob);
+    var d = new Date();
+    var stamp = d.getFullYear() + '-' +
+      String(d.getMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getDate()).padStart(2, '0');
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'youtube-history-merged_' + stamp + '.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 10000);
+  }
+
   function initImport() {
     el.dropzone.addEventListener('click', function () { el.fileInput.click(); });
     el.dropzone.addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); el.fileInput.click(); }
     });
     el.fileInput.addEventListener('change', function () {
-      if (el.fileInput.files && el.fileInput.files[0]) handleFile(el.fileInput.files[0]);
+      handleFiles(el.fileInput.files, false);
     });
+
+    // 分析画面から追加で読み込む
+    el.addInput.addEventListener('change', function () {
+      handleFiles(el.addInput.files, true);
+      el.addInput.value = '';
+    });
+    el.add.addEventListener('click', function () { el.addInput.click(); });
+    el.export.addEventListener('click', exportMerged);
 
     ['dragenter', 'dragover'].forEach(function (t) {
       el.dropzone.addEventListener(t, function (ev) {
@@ -103,8 +169,8 @@
       });
     });
     el.dropzone.addEventListener('drop', function (ev) {
-      var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
-      if (f) handleFile(f);
+      var fs = ev.dataTransfer && ev.dataTransfer.files;
+      if (fs && fs.length) handleFiles(fs, false);
     });
     // ページ外へのドロップでブラウザが遷移しないようにする
     global.addEventListener('dragover', function (ev) { ev.preventDefault(); });
@@ -163,7 +229,7 @@
     f.to = el.to.value || null;
     f.q = el.search.value;
     f.music = el.music.checked;
-    f.ads = el.ads.checked;
+    f.shorts = el.shorts.checked;
     f.dedupe = Number(el.dedupe.value);
     el.custom.hidden = f.range !== 'custom';
   }
@@ -172,7 +238,7 @@
     var b = rangeBounds();
     var f = state.filters;
     var filtered = Analytics.filter(state.events, {
-      from: b.from, to: b.to, q: f.q, music: f.music, ads: f.ads
+      from: b.from, to: b.to, q: f.q, music: f.music, shorts: f.shorts
     });
     var deduped = Analytics.dedupe(filtered, f.dedupe);
     state.analysis = Analytics.analyze(deduped);
@@ -204,7 +270,7 @@
     el.to.addEventListener('change', onChange);
     el.dedupe.addEventListener('change', onChange);
     el.music.addEventListener('change', onChange);
-    el.ads.addEventListener('change', onChange);
+    el.shorts.addEventListener('change', onChange);
     el.search.addEventListener('input', onChangeDebounced);
   }
 
@@ -262,6 +328,10 @@
       var c = state.analysis.channelMap.get(id);
       if (!c) return;
       openOverlay(c.name, Views.channelDetail(state.analysis, c, api));
+    },
+    openMonth: function (key) {
+      if (!key) return;
+      openOverlay(U.fmtMonth(key), Views.monthDetail(state.analysis, key, api));
     }
   };
 
@@ -275,13 +345,41 @@
 
   /* ================= 起動 ================= */
 
+  // ヘッダーの件数表示にマウスを当てたときに出す、ソース別の内訳
+  function buildSourceTooltip() {
+    var m = state.meta || {};
+    var lines = [];
+    if (m.sources && m.sources.length) {
+      lines.push('読み込んだファイル：');
+      m.sources.forEach(function (s) {
+        lines.push('  ' + s.name + '  ' + U.int(s.count) + ' 件（新規 ' + U.int(s.added) +
+          ' / 重複 ' + U.int(s.duplicates === undefined ? s.count - s.added : s.duplicates) + '）');
+      });
+    }
+    if (m.skipped && m.skipped.ads) {
+      lines.push('広告として除外：' + U.int(m.skipped.ads) + ' 件');
+    }
+    if (m.skipped && m.skipped.search) {
+      lines.push('検索の記録として除外：' + U.int(m.skipped.search) + ' 件');
+    }
+    return lines.join('\n');
+  }
+
   function enterApp() {
     el.import.hidden = true;
     el.app.hidden = false;
     el.reset.hidden = false;
+    el.add.hidden = false;
+    el.export.hidden = false;
     el.source.hidden = false;
-    el.source.textContent = (state.meta.sourceName || '読み込み済み') +
-      '・' + U.int(state.events.length) + ' 件';
+
+    var span = '';
+    if (state.events.length) {
+      span = U.fmtMonth(U.monthKey(state.events[0].t)) + '〜' +
+             U.fmtMonth(U.monthKey(state.events[state.events.length - 1].t)) + '・';
+    }
+    el.source.textContent = span + U.int(state.events.length) + ' 件';
+    el.source.title = buildSourceTooltip();
 
     buildRangeOptions();
     readFilters();
@@ -299,8 +397,11 @@
       el.app.hidden = true;
       el.import.hidden = false;
       el.reset.hidden = true;
+      el.add.hidden = true;
+      el.export.hidden = true;
       el.source.hidden = true;
       el.progress.hidden = true;
+      el.notice.hidden = true;
       el.fileInput.value = '';
     });
   }
@@ -315,10 +416,14 @@
       progressFill: U.$('#progress-fill'),
       progressLabel: U.$('#progress-label'),
       error: U.$('#import-error'),
+      notice: U.$('#import-notice'),
       demo: U.$('#btn-demo'),
       persist: U.$('#opt-persist'),
       theme: U.$('#btn-theme'),
       reset: U.$('#btn-reset'),
+      add: U.$('#btn-add'),
+      addInput: U.$('#add-input'),
+      export: U.$('#btn-export'),
       source: U.$('#source-label'),
       range: U.$('#f-range'),
       custom: U.$('#f-custom'),
@@ -327,7 +432,7 @@
       search: U.$('#f-search'),
       dedupe: U.$('#f-dedupe'),
       music: U.$('#f-music'),
-      ads: U.$('#f-ads'),
+      shorts: U.$('#f-shorts'),
       summary: U.$('#filter-summary'),
       tabs: U.$('#tabs'),
       view: U.$('#view'),

@@ -1,2 +1,14 @@
 .DS_Store
 Thumbs.db
+
+# 視聴履歴そのものは絶対にコミットしない（このリポジトリは公開されている）。
+# 解析用に置いたファイルが誤って入らないようにする。
+youtube-history-merged*.json
+watch-history*.html
+watch-history*.json
+watch-history*.txt
+マイアクティビティ*.html
+*マイ アクティビティ*.html
+検索履歴*.html
+検索履歴*.json
+takeout*.zip

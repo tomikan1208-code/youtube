@@ -10,8 +10,9 @@
      ch:      string|null   チャンネル名
      chId:    string|null   チャンネル ID
      music:   boolean       YouTube Music の再生か
-     ad:      boolean       広告か
      gone:    boolean       削除・非公開でタイトルが取れなかったか
+
+   広告（「Google 広告から」の記録）は視聴ではないので、読み込む時点で捨てる。
    }
 */
 (function (global) {
@@ -37,6 +38,11 @@
     /^Hai cercato /, /^Pesquisou por /, /^Gesucht nach /, / 검색함$/
   ];
 
+  // 広告の印。Takeout は言語ごとに表記が変わるので、日本語も必ず入れておく。
+  // 日本語で書き出したファイルには「Google 広告から」しか現れない（英語表記は 0 件だった）。
+  // 動画タイトルに「広告」が入っていても誤爆しないよう、「Google」まで含めて照合する。
+  var AD_MARKER = /Google\s広告から|From Google Ads|Google Ads|Google 광고|Anuncios de Google|Annonces Google/;
+
   function cleanTitle(raw) {
     if (!raw) return '';
     var s = String(raw);
@@ -48,6 +54,15 @@
       if (s.length > suf.length && s.slice(-suf.length) === suf) return s.slice(0, -suf.length).trim();
     }
     return s.trim();
+  }
+
+  // 「〜を視聴しました」の行だけが視聴。マイアクティビティの書き出しには
+  // 「高く評価しました」「低く評価しました」「非表示:」など別の操作も混ざっていて、
+  // これらは動画リンクを持つので、放っておくと視聴として数えられてしまう。
+  // cleanTitle が何か削れた＝視聴を表す言い回しが付いていた、と判定する。
+  function isWatchText(raw) {
+    if (!raw) return false;
+    return cleanTitle(raw) !== String(raw).trim();
   }
 
   function isSearchEntry(title, url) {
@@ -77,9 +92,22 @@
     return m ? m[1] : null;
   }
 
-  function makeEvent(t, title, url, chName, chUrl, music, ad) {
+  // ショート動画の判定。
+  // Takeout はショートも通常の watch?v= として記録するため、URL では判別できない
+  // （実データ 166,609 件のうち /shorts/ 形式の URL は 0 件だった）。
+  // 唯一の手がかりが、投稿者がタイトルに付ける #shorts などのタグ。
+  // 「Beautiful shorts」のような普通の英単語を拾わないよう、記号付きだけを見る。
+  var SHORTS_TAG = /[#＃@][ 　]*shorts?\b|[【[（(][ 　]*shorts?[ 　]*[】\]）)]/i;
+
+  Parser.isShorts = function (title, url) {
+    if (url && url.indexOf('/shorts/') >= 0) return true;
+    return SHORTS_TAG.test(title || '');
+  };
+
+  function makeEvent(t, title, url, chName, chUrl, music) {
     var videoId = videoIdFromUrl(url);
     var gone = false;
+    var shorts = Parser.isShorts(title, url);
 
     // 削除・非公開の動画はタイトル欄に URL がそのまま入る
     if (!title || /^https?:\/\//.test(title)) {
@@ -95,7 +123,7 @@
       ch: chName || null,
       chId: channelIdFromUrl(chUrl),
       music: !!music,
-      ad: !!ad,
+      shorts: shorts,
       gone: gone
     };
   }
@@ -106,13 +134,13 @@
     if (!Array.isArray(raw)) throw new Error('JSON の形式が想定と違います（配列ではありません）');
 
     var events = [];
-    var skipped = { search: 0, noTime: 0, other: 0 };
+    var skipped = { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 };
 
     for (var i = 0; i < raw.length; i++) {
       var r = raw[i];
       if (!r || typeof r !== 'object') { skipped.other++; continue; }
       if (r.products && r.products.indexOf && r.products.indexOf('YouTube') < 0 &&
-          r.products.indexOf('YouTube Music') < 0) { skipped.other++; continue; }
+          r.products.indexOf('YouTube Music') < 0) { skipped.notYouTube++; continue; }
 
       var url = r.titleUrl || null;
       if (isSearchEntry(r.title, url)) { skipped.search++; continue; }
@@ -120,12 +148,17 @@
       var t = r.time ? Date.parse(r.time) : NaN;
       if (!isFinite(t)) { skipped.noTime++; continue; }
 
+      // 広告は視聴ではないので数に入れない
       var ad = false;
       if (Array.isArray(r.details)) {
         for (var d = 0; d < r.details.length; d++) {
-          if (r.details[d] && /Google Ads/i.test(r.details[d].name || '')) { ad = true; break; }
+          if (r.details[d] && AD_MARKER.test(r.details[d].name || '')) { ad = true; break; }
         }
       }
+      if (ad) { skipped.ads++; continue; }
+
+      // 高く評価した・低く評価した等は視聴ではないので取り込まない
+      if (!isWatchText(r.title)) { skipped.otherAction++; continue; }
 
       var sub = Array.isArray(r.subtitles) && r.subtitles.length ? r.subtitles[0] : null;
       events.push(makeEvent(
@@ -134,8 +167,7 @@
         url,
         sub ? sub.name : null,
         sub ? sub.url : null,
-        r.header === 'YouTube Music',
-        ad
+        r.header === 'YouTube Music'
       ));
 
       if (onProgress && (i & 8191) === 0) onProgress(i / raw.length);
@@ -149,6 +181,8 @@
   // 落ちるため、テキストを走査しながら必要な部分だけ取り出す。
   var RE_ANCHOR = /<a[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
   var RE_CONTENT_CELL = /<div[^>]*class="[^"]*content-cell[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
+  // ブロック先頭の見出しがサービス名（「YouTube」「検索」「Chrome」など）
+  var RE_HEADER_CELL = /<div[^>]*class="[^"]*header-cell[^"]*"[^>]*>([\s\S]*?)<\/div>/i;
 
   function decodeEntities(s) {
     if (s.indexOf('&') < 0) return s;
@@ -249,7 +283,7 @@
 
   async function fromHtml(text, onProgress) {
     var events = [];
-    var skipped = { search: 0, noTime: 0, other: 0 };
+    var skipped = { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 };
     var MARK = 'outer-cell';
     var pos = text.indexOf(MARK);
     var total = text.length;
@@ -261,10 +295,23 @@
       pos = next;
 
       var isMusic = block.indexOf('YouTube Music') >= 0 && /class="mdl-typography--title"[^>]*>\s*YouTube Music/.test(block);
-      var isAd = /From Google Ads/i.test(block);
 
-      var cell = RE_CONTENT_CELL.exec(block);
-      if (cell) {
+      // 「マイ アクティビティ」の書き出しには検索・Chrome など他サービスの記録も
+      // 混ざる。見出しのサービス名を見て、YouTube 以外は数に入れない。
+      // （Google 検索の結果から YouTube を開いた記録などが視聴として紛れ込むのを防ぐ）
+      var head = RE_HEADER_CELL.exec(block);
+      var service = head ? stripTags(head[1]) : '';
+      var isYouTube = service ? service.indexOf('YouTube') >= 0 : true;
+
+      // 広告は視聴ではないので、解析する前に捨てる
+      var isAd = isYouTube && AD_MARKER.test(block);
+      var cell = (!isYouTube || isAd) ? null : RE_CONTENT_CELL.exec(block);
+
+      if (!isYouTube) {
+        skipped.notYouTube++;
+      } else if (isAd) {
+        skipped.ads++;
+      } else if (cell) {
         var inner = cell[1];
         var links = [];
         RE_ANCHOR.lastIndex = 0;
@@ -276,7 +323,7 @@
         var video = null, channel = null;
         for (var i = 0; i < links.length; i++) {
           var href = links[i].href;
-          if (!video && /watch\?|youtu\.be\/|\/shorts\//.test(href)) video = links[i];
+          if (!video && /watch\?|youtu\.be\/|\/shorts\/|\/live\/|\/embed\//.test(href)) video = links[i];
           else if (!channel && /\/channel\/|youtube\.com\/@/.test(href)) channel = links[i];
         }
 
@@ -288,15 +335,23 @@
         }
         var t = Parser.parseLocalizedDate(dateStr);
 
-        if (video && isSearchEntry(video.text, video.href)) {
+        // 検索の記録は動画リンクを持たないので、video の有無だけでは判別できない。
+        // 1 行目の文言（「〜を検索しました」など）と検索結果 URL の両方を見る。
+        var looksSearch = isSearchEntry(video ? video.text : plain[0], video ? video.href : null) ||
+          links.some(function (l) { return /\/results\?/.test(l.href) || /google\.[^/]*\/search\?/.test(l.href); });
+
+        if (looksSearch) {
           skipped.search++;
         } else if (!isFinite(t)) {
           skipped.noTime++;
         } else if (!video) {
           skipped.other++;
+        } else if (!isWatchText(plain[0])) {
+          // 高く評価した・低く評価した・非表示にした等。動画リンクはあるが視聴ではない
+          skipped.otherAction++;
         } else {
           events.push(makeEvent(t, cleanTitle(video.text), video.href,
-            channel ? channel.text : null, channel ? channel.href : null, isMusic, isAd));
+            channel ? channel.text : null, channel ? channel.href : null, isMusic));
         }
       } else {
         skipped.other++;
@@ -311,92 +366,367 @@
     return { events: events, skipped: skipped };
   }
 
+  /* ---------------- 保存した「マイ アクティビティ」ページ ---------------- */
+
+  /* Takeout がうまく書き出せないときの逃げ道として、ブラウザの「名前を付けて保存」で
+     残した myactivity.google.com のページも読めるようにする。
+
+     Takeout の HTML とは別物で、1 件が c-wiz ブロック。大きな違いは
+     **時刻が「23:01」と分までしか無い**こと。秒が無いと Takeout 側の同じ視聴と
+     鍵が一致しないので、イベントに coarse: true を立てて、あとで分単位で
+     突き合わせる（Parser.merge を参照）。 */
+
+  var MA_MARK = 'class="xDtZAf"';
+  var RE_MA_DATE = /data-date="(\d{4})(\d{2})(\d{2})"/;
+  var RE_MA_TIME = /class="H3Q9vf[^"]*">\s*(\d{1,2}):(\d{2})/;
+  var RE_MA_SERVICE = /class="hJ7x8b">([^<]*)</;
+  var RE_MA_VIDEO = /<a[^>]+href="([^"]+)"[^>]*class="l8sGWb"[^>]*>([\s\S]*?)<\/a>/;
+  var RE_MA_CHANNEL = /class="SiEggd"[\s\S]{0,400}?<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/;
+
+  function looksLikeMyActivityPage(text) {
+    return text.indexOf(MA_MARK) >= 0 && text.indexOf('data-date="') >= 0;
+  }
+
+  async function fromMyActivityPage(text, onProgress) {
+    var events = [];
+    var skipped = { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 };
+    var pos = text.indexOf(MA_MARK);
+    var total = text.length;
+    var sinceYield = 0;
+
+    while (pos >= 0) {
+      var next = text.indexOf(MA_MARK, pos + MA_MARK.length);
+      var block = text.slice(pos, next < 0 ? text.length : next);
+      pos = next;
+
+      var svc = RE_MA_SERVICE.exec(block);
+      var dm = RE_MA_DATE.exec(block);
+      var tm = RE_MA_TIME.exec(block);
+
+      if (svc && svc[1].indexOf('YouTube') < 0) {
+        skipped.notYouTube++;
+      } else if (AD_MARKER.test(block) || /広告/.test(block)) {
+        skipped.ads++;
+      } else if (/を検索しました/.test(block) || /\/results\?/.test(block)) {
+        skipped.search++;
+      } else if (!dm || !tm) {
+        skipped.noTime++;
+      } else if (block.indexOf('を視聴しました') < 0) {
+        skipped.otherAction++;
+      } else {
+        var vid = RE_MA_VIDEO.exec(block);
+        if (!vid) {
+          skipped.other++;
+        } else {
+          var ch = RE_MA_CHANNEL.exec(block);
+          var title = stripTags(vid[2]);
+
+          // このページには「Google 広告から」の表示が無い（詳細を開かないと出ない）
+          // ので、広告を印で見分けられない。代わりに、同じアカウントの Takeout
+          // 90,914 件で確かめた次の関係を使う。
+          //   チャンネル有・タイトル有 → 広告 0.0%（0 / 80,005）
+          //   チャンネル無・タイトル有 → 広告 100%（3,368 / 3,368）
+          //   チャンネル無・タイトルが URL → 広告 18.7%（判別できない）
+          // 「チャンネルが無いのにタイトルがある」= 広告として落とす。
+          // タイトルが URL のものは削除・非公開の動画が大半なので残す。
+          if (!ch && !/^https?:\/\//.test(title)) {
+            skipped.ads++;
+          } else {
+            // 保存したページに時差の情報は無い。表示された時刻＝保存した人の
+            // ローカル時刻なので、そのままローカル時刻として組み立てる。
+            var t = new Date(+dm[1], +dm[2] - 1, +dm[3], +tm[1], +tm[2], 0, 0).getTime();
+            var ev = makeEvent(t, title, decodeEntities(vid[1]),
+              ch ? stripTags(ch[2]) : null, ch ? decodeEntities(ch[1]) : null, false);
+            ev.coarse = true;   // 秒が無い
+            events.push(ev);
+          }
+        }
+      }
+
+      if (++sinceYield >= 2000) {
+        sinceYield = 0;
+        if (onProgress) onProgress((pos < 0 ? total : pos) / total);
+        await U.nextFrame();
+      }
+    }
+    return { events: events, skipped: skipped };
+  }
+
+  /* ---------------- 統合ファイル（このアプリが書き出す形式） ---------------- */
+
+  var MERGED_FORMAT = 'yt-history-merged';
+
+  Parser.MERGED_FORMAT = MERGED_FORMAT;
+
+  Parser.buildMergedFile = function (events, sources) {
+    return {
+      format: MERGED_FORMAT,
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      count: events.length,
+      sources: sources || [],
+      events: events
+    };
+  };
+
+  function isMergedFile(data) {
+    return data && !Array.isArray(data) && data.format === MERGED_FORMAT && Array.isArray(data.events);
+  }
+
+  /* ---------------- 重複排除 ---------------- */
+
+  // 同じ視聴かどうかは「動画 ID ＋ 秒までの時刻」で判定する。
+  // JSON はミリ秒まで、HTML は秒までしか持たないので、秒に丸めないと
+  // 同じ視聴が別物として二重に残る。
+  function dedupeKey(e) {
+    return (e.videoId ? 'v:' + e.videoId : e.key) + '|' + Math.floor(e.t / 1000);
+  }
+
+  // 分までしか時刻が無いソースを、秒まであるソースと突き合わせるための鍵
+  function minuteKey(e) {
+    return (e.videoId ? 'v:' + e.videoId : e.key) + '|' + Math.floor(e.t / 60000);
+  }
+
+  function isCoarseList(src) {
+    var ev = src.events || [];
+    return ev.length > 0 && !!ev[0].coarse;
+  }
+
+  // 同じ視聴が複数のファイルにある場合、情報が多い方を残す。
+  // マイアクティビティ側はチャンネル名が入っていない行が 1 割ほどある。
+  function score(e) {
+    return (e.gone ? 0 : 4) + (e.ch ? 2 : 0) + (e.chId ? 1 : 0);
+  }
+
+  /**
+   * 複数ソースのイベントを 1 本にまとめる
+   * @param {Array<{name:string, events:Array, skipped?:Object}>} lists 先に渡した方が優先
+   * @returns {{events:Array, sources:Array}}
+   */
+  Parser.merge = function (lists) {
+    var map = new Map();
+    var minSet = new Set();   // 秒まである視聴の「動画＋分」
+    var stats = [];
+
+    // 分までしか時刻が無いソース（保存したマイ アクティビティのページ）は
+    // 秒まであるソースと鍵が一致しない。精度の高い方を先に入れておき、
+    // 同じ分に既に入っている視聴は重複として落とす。
+    var ordered = lists.map(function (l, i) { return { src: l, i: i, coarse: isCoarseList(l) }; });
+    ordered.sort(function (a, b) { return (a.coarse ? 1 : 0) - (b.coarse ? 1 : 0) || a.i - b.i; });
+
+    ordered.forEach(function (o) {
+      var events = o.src.events || [];
+      var before = map.size;
+      for (var i = 0; i < events.length; i++) {
+        var e = events[i];
+        // 秒まである同じ視聴が既にあるなら、分だけの記録は捨てる
+        if (e.coarse && minSet.has(minuteKey(e))) continue;
+        var k = dedupeKey(e);
+        var cur = map.get(k);
+        if (cur === undefined) {
+          map.set(k, e);
+          if (!e.coarse) minSet.add(minuteKey(e));
+        } else if (score(e) > score(cur)) {
+          map.set(k, e);
+        }
+      }
+      var added = map.size - before;
+      o.stat = {
+        name: o.src.name,
+        count: events.length,
+        added: added,
+        duplicates: events.length - added,
+        coarse: o.coarse,
+        skipped: o.src.skipped || null
+      };
+    });
+
+    // 表示は読み込んだ順に戻す
+    ordered.slice().sort(function (a, b) { return a.i - b.i; })
+      .forEach(function (o) { stats.push(o.stat); });
+
+    var events = [];
+    map.forEach(function (v) { events.push(v); });
+    events.sort(function (a, b) { return a.t - b.t; });
+    return { events: events, sources: stats };
+  };
+
   /* ---------------- 入口 ---------------- */
 
-  var HISTORY_NAME = /(watch[-_ ]?history|再生履歴|視聴履歴|시청_기록|시청 기록|verlauf|historial|historique)\.(json|html?)$/i;
+  // 「マイアクティビティ.html」も再生履歴として扱う。watch-history とは別の
+  // ストリームだが、視聴の記録という点では同じで、古い期間はこちらにしか残らない。
+  var HISTORY_NAME =
+    /(watch[-_ ]?history|再生履歴|視聴履歴|マイ ?アクティビティ|my ?activity|시청_기록|시청 기록|verlauf|historial|historique)[^/\\]*\.(json|html?|txt)$/i;
 
-  function pickHistoryEntry(entries) {
-    var candidates = entries.filter(function (e) { return HISTORY_NAME.test(e.name); });
+  // 検索履歴・コメント・チャットなど、視聴履歴ではないもの
+  var NOT_HISTORY = /(search|検索|コメント|comment|chat|チャット|subscri|登録チャンネル|再生リスト|playlist|クリップ|clip)/i;
+
+  function pickHistoryEntries(entries) {
+    var candidates = entries.filter(function (e) {
+      return HISTORY_NAME.test(e.name) && !NOT_HISTORY.test(e.name);
+    });
     if (!candidates.length) {
-      // ファイル名が言語依存で一致しない場合は「履歴」フォルダ配下から拾う
+      // ファイル名が言語依存で一致しない場合は「YouTube」を含むパスから拾う
       candidates = entries.filter(function (e) {
-        return /youtube/i.test(e.name) && /\.(json|html?)$/i.test(e.name) &&
-               !/(search|検索|コメント|comment|chat|チャット)/i.test(e.name);
+        return /youtube/i.test(e.name) && /\.(json|html?|txt)$/i.test(e.name) &&
+               !NOT_HISTORY.test(e.name);
       });
     }
-    if (!candidates.length) return null;
-    // JSON を優先し、同形式なら大きい方（＝件数が多い方）を選ぶ
+    // 同じ zip に JSON と HTML の両方が入っていることがある。どちらか一方を
+    // 選ぶのではなく全部読んで、後で重複排除する（片方にしか無い行があるため）。
     candidates.sort(function (a, b) {
       var aj = /\.json$/i.test(a.name) ? 0 : 1;
       var bj = /\.json$/i.test(b.name) ? 0 : 1;
       if (aj !== bj) return aj - bj;
       return b.size - a.size;
     });
-    return candidates[0];
+    return candidates;
+  }
+
+  // 1 つの blob を読んでイベント配列にする
+  async function readBlob(blob, name, report) {
+    report(0.25, '「' + name + '」を読み込んでいます…');
+    var text = await blob.text();
+    report(0.45, '「' + name + '」を解析しています…');
+    await U.nextFrame();
+
+    var looksJson = /\.json$/i.test(name) || /^\s*[[{]/.test(text.slice(0, 200));
+    if (!looksJson) {
+      var step = function (r) { report(0.45 + r * 0.5, '「' + name + '」を解析しています…'); };
+      // Takeout の HTML は outer-cell。それが無くて c-wiz なら、
+      // ブラウザで保存した「マイ アクティビティ」のページ。
+      if (text.indexOf('outer-cell') < 0 && looksLikeMyActivityPage(text)) {
+        return await fromMyActivityPage(text, step);
+      }
+      return await fromHtml(text, step);
+    }
+
+    var data;
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      throw new Error('JSON を解釈できませんでした（ファイルが壊れている可能性があります）');
+    }
+
+    // このアプリが書き出した統合ファイルなら、解析し直さずそのまま使う
+    if (isMergedFile(data)) {
+      // ショート判定を入れる前に書き出した統合ファイルには shorts が無いので補う
+      for (var i = 0; i < data.events.length; i++) {
+        var ev = data.events[i];
+        if (ev.shorts === undefined) ev.shorts = Parser.isShorts(ev.title, ev.url);
+      }
+      return {
+        events: data.events,
+        skipped: { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 },
+        merged: true
+      };
+    }
+    return fromJson(data, function (r) { report(0.45 + r * 0.5, '「' + name + '」を解析しています…'); });
+  }
+
+  // File 1 つを「読むべき blob の一覧」に展開する（zip なら複数になる）
+  async function expand(file, report) {
+    var name = file.name || '';
+    if (!/\.zip$/i.test(name)) return [{ name: name, blob: file }];
+
+    report(0.02, 'zip の中身を確認しています…');
+    var entries = await Zip.list(file);
+    var picked = pickHistoryEntries(entries);
+    if (!picked.length) {
+      throw new Error('zip「' + name + '」の中に再生履歴が見つかりませんでした。' +
+        'Takeout で「YouTube と YouTube Music → 履歴」を含めて書き出したか確認してください。');
+    }
+    var out = [];
+    for (var i = 0; i < picked.length; i++) {
+      report(0.04, '「' + picked[i].name.split('/').pop() + '」を取り出しています…');
+      out.push({ name: picked[i].name.split('/').pop(), blob: await Zip.read(file, picked[i]) });
+    }
+    return out;
   }
 
   /**
-   * ファイル（json / html / zip）を読み込んでイベント配列を返す
-   * @param {File} file
+   * 複数ファイル（json / html / txt / zip / 統合 json）を読み込んで 1 本にまとめる
+   * @param {FileList|File[]} files
    * @param {(ratio:number, label:string)=>void} onProgress
    */
-  Parser.loadFile = async function (file, onProgress) {
-    var report = function (r, label) { if (onProgress) onProgress(r, label); };
-    var name = file.name || '';
-    var sourceName = name;
-    var blob = file;
+  Parser.loadFiles = async function (files, onProgress) {
+    var list = Array.prototype.slice.call(files || []);
+    if (!list.length) throw new Error('ファイルが選ばれていません');
 
-    if (/\.zip$/i.test(name)) {
-      report(0.02, 'zip の中身を確認しています…');
-      var entries = await Zip.list(file);
-      var entry = pickHistoryEntry(entries);
-      if (!entry) {
-        throw new Error('zip の中に再生履歴が見つかりませんでした。Takeout で「YouTube と YouTube Music → 履歴」を含めて書き出したか確認してください。');
-      }
-      report(0.08, '「' + entry.name.split('/').pop() + '」を取り出しています…');
-      blob = await Zip.read(file, entry);
-      sourceName = entry.name.split('/').pop();
-      name = entry.name;
-    }
+    var report = function (r, label) { if (onProgress) onProgress(Math.min(0.99, r), label); };
+    var lists = [];
+    var warnings = [];
+    var total = { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 };
+    var hadMerged = false;
 
-    report(0.25, 'ファイルを読み込んでいます…');
-    var text = await blob.text();
-    report(0.45, '解析しています…');
-    await U.nextFrame();
+    for (var i = 0; i < list.length; i++) {
+      var base = i / list.length;
+      var span = 1 / list.length;
+      var step = (function (b, s) {
+        return function (r, label) { report(b + r * s, label); };
+      })(base, span);
 
-    var result;
-    var looksJson = /\.json$/i.test(name) || /^\s*[[{]/.test(text.slice(0, 200));
-
-    if (looksJson) {
-      var data;
+      var parts;
       try {
-        data = JSON.parse(text);
-      } catch (e) {
-        throw new Error('JSON を解釈できませんでした（ファイルが壊れている可能性があります）');
+        parts = await expand(list[i], step);
+      } catch (err) {
+        warnings.push((list[i].name || 'ファイル') + '：' + err.message);
+        continue;
       }
-      result = fromJson(data, function (r) { report(0.45 + r * 0.5, '解析しています…'); });
-    } else {
-      result = await fromHtml(text, function (r) { report(0.45 + r * 0.5, '解析しています…'); });
+
+      for (var j = 0; j < parts.length; j++) {
+        try {
+          var res = await readBlob(parts[j].blob, parts[j].name, step);
+          if (res.merged) hadMerged = true;
+          if (!res.events.length) {
+            var why = 'に視聴の記録が 1 件もありませんでした。読み飛ばしました。';
+            if (res.skipped.notYouTube > res.skipped.search) {
+              why = 'は YouTube 以外のアクティビティ（検索や Chrome など）のようです。読み飛ばしました。';
+            } else if (res.skipped.search > 0) {
+              why = 'は検索履歴のようです。視聴の記録が無いので読み飛ばしました。';
+            }
+            warnings.push('「' + parts[j].name + '」' + why);
+            continue;
+          }
+          total.search += res.skipped.search || 0;
+          total.noTime += res.skipped.noTime || 0;
+          total.other += res.skipped.other || 0;
+          total.ads += res.skipped.ads || 0;
+          total.notYouTube += res.skipped.notYouTube || 0;
+          total.otherAction += res.skipped.otherAction || 0;
+          lists.push({ name: parts[j].name, events: res.events, skipped: res.skipped });
+        } catch (err) {
+          warnings.push('「' + parts[j].name + '」：' + err.message);
+        }
+      }
     }
 
-    if (!result.events.length) {
-      if (result.skipped.search > 0) {
-        throw new Error('このファイルは検索履歴のようです。「再生履歴（watch-history）」を読み込ませてください。');
-      }
-      throw new Error('視聴の記録が 1 件も見つかりませんでした。再生履歴のファイルか確認してください。');
+    if (!lists.length) {
+      throw new Error(warnings.length
+        ? warnings.join('\n')
+        : '視聴の記録が 1 件も見つかりませんでした。再生履歴のファイルか確認してください。');
     }
 
-    report(0.97, '並べ替えています…');
-    result.events.sort(function (a, b) { return a.t - b.t; });
+    report(0.99, 'まとめています…');
+    await U.nextFrame();
+    var merged = Parser.merge(lists);
 
     return {
-      events: result.events,
+      events: merged.events,
       meta: {
-        sourceName: sourceName,
+        sourceName: lists.map(function (s) { return s.name; }).join('、'),
+        sources: merged.sources,
         importedAt: Date.now(),
-        skipped: result.skipped
+        skipped: total,
+        warnings: warnings,
+        fromMergedFile: hadMerged
       }
     };
+  };
+
+  /** 1 ファイル版（従来の入口） */
+  Parser.loadFile = function (file, onProgress) {
+    return Parser.loadFiles([file], onProgress);
   };
 
   Parser.cleanTitle = cleanTitle;
