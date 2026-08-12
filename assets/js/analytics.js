@@ -16,6 +16,7 @@
       var e = events[i];
       if (e.t < from || e.t > to) continue;
       if (!opt.music && e.music) continue;
+      if (!opt.shorts && e.shorts) continue;
       if (q) {
         var hay = e.title.toLowerCase() + ' ' + (e.ch ? e.ch.toLowerCase() : '');
         if (hay.indexOf(q) < 0) continue;
@@ -54,6 +55,7 @@
     var channelMap = new Map();
     var dayCount = new Map();
     var monthMap = new Map();
+    var dayMap = new Map();
     var heat = [];
     for (var w = 0; w < 7; w++) heat.push(new Array(24).fill(0));
 
@@ -108,6 +110,12 @@
       var dk = U.dayKey(e.t);
       dayCount.set(dk, (dayCount.get(dk) || 0) + 1);
 
+      // 月の棒から日ごとへ掘り下げるための内訳
+      var dm = dayMap.get(dk);
+      if (!dm) { dm = { key: dk, total: 0, discovery: 0, repeat: 0 }; dayMap.set(dk, dm); }
+      dm.total++;
+      if (isFirst) dm.discovery++; else dm.repeat++;
+
       var mk = U.monthKey(e.t);
       var m = monthMap.get(mk);
       if (!m) { m = { key: mk, total: 0, discovery: 0, repeat: 0, channels: new Set() }; monthMap.set(mk, m); }
@@ -117,7 +125,7 @@
       heat[d.getDay()][d.getHours()]++;
 
       if (e.music) musicPlays++;
-      if (e.url && e.url.indexOf('/shorts/') >= 0) shortsPlays++;
+      if (e.shorts) shortsPlays++;
     }
 
     /* --- 配列化 --- */
@@ -191,6 +199,7 @@
       channelMap: channelMap,
       months: months,
       dayCount: dayCount,
+      dayMap: dayMap,
       heat: heat,
       hourTotals: hourTotals,
       peakHour: peakHour,
@@ -219,6 +228,41 @@
   };
 
   /* ---------------- 派生ビュー ---------------- */
+
+  /**
+   * その月の 1 日ごとの内訳。見ていない日も 0 として埋めるので、
+   * 月の途中の空白がグラフでそのまま見える。
+   * @returns {{days:Array, total:number, discovery:number, repeat:number, activeDays:number, best:Object|null}}
+   */
+  A.monthDays = function (analysis, monthKey) {
+    var y = Number(monthKey.slice(0, 4));
+    var mo = Number(monthKey.slice(5, 7));
+    var last = new Date(y, mo, 0).getDate();   // 月末日（翌月の 0 日）
+    var days = [];
+    var total = 0, discovery = 0, repeat = 0, activeDays = 0, best = null;
+
+    for (var d = 1; d <= last; d++) {
+      var key = monthKey + '-' + U.pad2(d);
+      var src = analysis.dayMap.get(key);
+      var row = {
+        key: key,
+        day: d,
+        total: src ? src.total : 0,
+        discovery: src ? src.discovery : 0,
+        repeat: src ? src.repeat : 0
+      };
+      days.push(row);
+      total += row.total;
+      discovery += row.discovery;
+      repeat += row.repeat;
+      if (row.total > 0) activeDays++;
+      if (!best || row.total > best.total) best = row;
+    }
+    return {
+      days: days, total: total, discovery: discovery, repeat: repeat,
+      activeDays: activeDays, best: best && best.total > 0 ? best : null
+    };
+  };
 
   /** そのチャンネルで最初に見た動画の一覧（チャンネルを見つけた順） */
   A.channelDiscovery = function (analysis) {

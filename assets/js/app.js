@@ -15,6 +15,7 @@
       to: null,
       q: '',
       music: true,
+      shorts: true,
       dedupe: 300000
     }
   };
@@ -228,6 +229,7 @@
     f.to = el.to.value || null;
     f.q = el.search.value;
     f.music = el.music.checked;
+    f.shorts = el.shorts.checked;
     f.dedupe = Number(el.dedupe.value);
     el.custom.hidden = f.range !== 'custom';
   }
@@ -236,7 +238,7 @@
     var b = rangeBounds();
     var f = state.filters;
     var filtered = Analytics.filter(state.events, {
-      from: b.from, to: b.to, q: f.q, music: f.music
+      from: b.from, to: b.to, q: f.q, music: f.music, shorts: f.shorts
     });
     var deduped = Analytics.dedupe(filtered, f.dedupe);
     state.analysis = Analytics.analyze(deduped);
@@ -268,6 +270,7 @@
     el.to.addEventListener('change', onChange);
     el.dedupe.addEventListener('change', onChange);
     el.music.addEventListener('change', onChange);
+    el.shorts.addEventListener('change', onChange);
     el.search.addEventListener('input', onChangeDebounced);
   }
 
@@ -325,6 +328,10 @@
       var c = state.analysis.channelMap.get(id);
       if (!c) return;
       openOverlay(c.name, Views.channelDetail(state.analysis, c, api));
+    },
+    openMonth: function (key) {
+      if (!key) return;
+      openOverlay(U.fmtMonth(key), Views.monthDetail(state.analysis, key, api));
     }
   };
 
@@ -425,6 +432,7 @@
       search: U.$('#f-search'),
       dedupe: U.$('#f-dedupe'),
       music: U.$('#f-music'),
+      shorts: U.$('#f-shorts'),
       summary: U.$('#filter-summary'),
       tabs: U.$('#tabs'),
       view: U.$('#view'),

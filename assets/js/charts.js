@@ -293,8 +293,15 @@
         var hit = svg('rect', {
           x: padL + band * i, y: padT, width: Math.max(band, 1), height: plotH,
           fill: 'transparent', tabindex: 0, role: 'button',
-          'aria-label': d.label + ' 合計 ' + total
+          style: o.onSelect ? { cursor: 'pointer' } : null,
+          'aria-label': d.label + ' 合計 ' + total + (o.onSelect ? '（選ぶと内訳を表示）' : '')
         });
+        if (o.onSelect) {
+          hit.addEventListener('click', function () { o.onSelect(d); });
+          hit.addEventListener('keydown', function (ev) {
+            if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); o.onSelect(d); }
+          });
+        }
         var showTip = function () {
           var rows = o.series.map(function (s, si) {
             return { color: s.color, value: U.int(d.values[si]), name: s.name };

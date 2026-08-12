@@ -111,7 +111,7 @@
             ch: p.ch.n,
             chId: p.chId,
             music: p.ch.music,
-            ad: false,
+            shorts: Parser.isShorts(v2.title, null),
             gone: false
           });
         }
@@ -123,7 +123,7 @@
         events.push({
           t: tg, key: 'v:gone' + g, videoId: 'gone' + g + 'zzz',
           title: '（削除・非公開の動画）', url: 'https://www.youtube.com/watch?v=gone' + g,
-          ch: null, chId: null, music: false, ad: false, gone: true
+          ch: null, chId: null, music: false, shorts: false, gone: true
         });
       }
 

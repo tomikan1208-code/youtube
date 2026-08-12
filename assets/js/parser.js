@@ -92,9 +92,22 @@
     return m ? m[1] : null;
   }
 
+  // ショート動画の判定。
+  // Takeout はショートも通常の watch?v= として記録するため、URL では判別できない
+  // （実データ 166,609 件のうち /shorts/ 形式の URL は 0 件だった）。
+  // 唯一の手がかりが、投稿者がタイトルに付ける #shorts などのタグ。
+  // 「Beautiful shorts」のような普通の英単語を拾わないよう、記号付きだけを見る。
+  var SHORTS_TAG = /[#＃@][ 　]*shorts?\b|[【[（(][ 　]*shorts?[ 　]*[】\]）)]/i;
+
+  Parser.isShorts = function (title, url) {
+    if (url && url.indexOf('/shorts/') >= 0) return true;
+    return SHORTS_TAG.test(title || '');
+  };
+
   function makeEvent(t, title, url, chName, chUrl, music) {
     var videoId = videoIdFromUrl(url);
     var gone = false;
+    var shorts = Parser.isShorts(title, url);
 
     // 削除・非公開の動画はタイトル欄に URL がそのまま入る
     if (!title || /^https?:\/\//.test(title)) {
@@ -110,6 +123,7 @@
       ch: chName || null,
       chId: channelIdFromUrl(chUrl),
       music: !!music,
+      shorts: shorts,
       gone: gone
     };
   }
@@ -476,6 +490,11 @@
 
     // このアプリが書き出した統合ファイルなら、解析し直さずそのまま使う
     if (isMergedFile(data)) {
+      // ショート判定を入れる前に書き出した統合ファイルには shorts が無いので補う
+      for (var i = 0; i < data.events.length; i++) {
+        var ev = data.events[i];
+        if (ev.shorts === undefined) ev.shorts = Parser.isShorts(ev.title, ev.url);
+      }
       return {
         events: data.events,
         skipped: { search: 0, noTime: 0, other: 0, ads: 0, notYouTube: 0, otherAction: 0 },
