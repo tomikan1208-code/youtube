@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube 視聴履歴ビューア</title>
+<meta name="description" content="Google Takeout で書き出した YouTube の再生履歴を、ブラウザの中だけで解析して可視化します。">
+<link rel="stylesheet" href="assets/css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📺</text></svg>">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-header__inner">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true"></span>
+      <span class="brand__name">YouTube 視聴履歴ビューア</span>
+    </div>
+    <div class="app-header__actions">
+      <span id="source-label" class="source-label" hidden></span>
+      <button type="button" id="btn-theme" class="btn btn--ghost" aria-label="配色を切り替える" title="配色を切り替える">
+        <span class="btn__icon" aria-hidden="true">◐</span>
+      </button>
+      <button type="button" id="btn-reset" class="btn btn--ghost" hidden>データを削除</button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+
+  <!-- ============ 取り込み画面 ============ -->
+  <section id="screen-import" class="screen">
+    <div class="import">
+      <h1 class="import__title">視聴履歴を読み込む</h1>
+      <p class="import__lead">
+        Google Takeout で書き出した YouTube の履歴ファイルを選ぶと、同じ動画を何回見たか・繰り返し見た動画のランキング・チャンネル別の再生回数・そのチャンネルで最初に見た動画などを表示します。
+      </p>
+
+      <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="dropzone-hint">
+        <div class="dropzone__icon" aria-hidden="true">＋</div>
+        <div class="dropzone__main">ファイルをドロップ、またはクリックして選択</div>
+        <div id="dropzone-hint" class="dropzone__hint">
+          <code>watch-history.json</code> / <code>再生履歴.html</code> / Takeout の <code>.zip</code> に対応
+        </div>
+        <input type="file" id="file-input" accept=".json,.html,.htm,.zip" hidden>
+      </div>
+
+      <div id="import-progress" class="progress" hidden>
+        <div class="progress__bar"><div class="progress__fill" id="progress-fill"></div></div>
+        <div class="progress__label" id="progress-label">読み込み中…</div>
+      </div>
+
+      <p id="import-error" class="notice notice--error" hidden></p>
+
+      <div class="import__alt">
+        <button type="button" id="btn-demo" class="btn btn--quiet">サンプルデータで試す</button>
+      </div>
+
+      <div class="import__notes">
+        <h2 class="import__notes-title">プライバシーについて</h2>
+        <p>
+          読み込んだ履歴はブラウザの中だけで処理されます。どこにも送信されません。
+          「このブラウザに保存する」を有効にした場合のみ、次回すぐ開けるように端末内（IndexedDB）へ保存します。保存したデータは「データを削除」でいつでも消せます。
+        </p>
+        <label class="check">
+          <input type="checkbox" id="opt-persist" checked>
+          <span>このブラウザに保存する</span>
+        </label>
+
+        <h2 class="import__notes-title">履歴の書き出し方</h2>
+        <ol class="steps">
+          <li><a href="https://takeout.google.com/" target="_blank" rel="noopener noreferrer">Google Takeout</a> を開く</li>
+          <li>「選択をすべて解除」してから <b>YouTube と YouTube Music</b> だけを選ぶ</li>
+          <li>「含めるデータの選択」で <b>履歴</b> のみに絞り、形式を <b>JSON</b> にすると解析が速く正確です</li>
+          <li>書き出した zip、または中の <code>履歴/再生履歴.json</code> をここに読み込ませる</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 分析画面 ============ -->
+  <section id="screen-app" class="screen" hidden>
+
+    <div class="filterbar" id="filterbar">
+      <div class="filterbar__row">
+        <div class="field">
+          <label class="field__label" for="f-range">期間</label>
+          <select id="f-range" class="input"></select>
+        </div>
+        <div class="field field--custom" id="f-custom" hidden>
+          <label class="field__label" for="f-from">開始</label>
+          <input type="date" id="f-from" class="input">
+          <label class="field__label" for="f-to">終了</label>
+          <input type="date" id="f-to" class="input">
+        </div>
+        <div class="field field--grow">
+          <label class="field__label" for="f-search">検索</label>
+          <input type="search" id="f-search" class="input" placeholder="動画タイトル・チャンネル名">
+        </div>
+        <div class="field">
+          <label class="field__label" for="f-dedupe">重複をまとめる</label>
+          <select id="f-dedupe" class="input">
+            <option value="0">まとめない</option>
+            <option value="300000" selected>5分以内は1回</option>
+            <option value="1800000">30分以内は1回</option>
+            <option value="86400000">同じ日は1回</option>
+          </select>
+        </div>
+        <div class="field field--checks">
+          <label class="check"><input type="checkbox" id="f-music" checked><span>YouTube Music を含む</span></label>
+          <label class="check"><input type="checkbox" id="f-ads"><span>広告を含む</span></label>
+        </div>
+      </div>
+      <div class="filterbar__summary" id="filter-summary"></div>
+    </div>
+
+    <nav class="tabs" id="tabs" aria-label="表示の切り替え">
+      <button type="button" class="tab" data-view="dashboard">ダッシュボード</button>
+      <button type="button" class="tab" data-view="videos">動画ランキング</button>
+      <button type="button" class="tab" data-view="channels">チャンネル</button>
+      <button type="button" class="tab" data-view="discovery">はじめて見た記録</button>
+      <button type="button" class="tab" data-view="history">履歴</button>
+    </nav>
+
+    <div id="view" class="view" role="region" aria-live="polite"></div>
+  </section>
+</main>
+
+<div id="overlay" class="overlay" hidden>
+  <div class="overlay__backdrop" data-close="1"></div>
+  <div class="overlay__panel" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
+    <div class="overlay__head">
+      <h2 class="overlay__title" id="overlay-title"></h2>
+      <button type="button" class="btn btn--ghost" id="overlay-close" aria-label="閉じる">✕</button>
+    </div>
+    <div class="overlay__body" id="overlay-body"></div>
+  </div>
+</div>
+
+<footer class="app-footer">
+  <p>すべての処理はこのブラウザの中だけで行われます。履歴データが外部に送信されることはありません。</p>
+</footer>
+
+<script src="assets/js/utils.js"></script>
+<script src="assets/js/zip.js"></script>
+<script src="assets/js/parser.js"></script>
+<script src="assets/js/analytics.js"></script>
+<script src="assets/js/charts.js"></script>
+<script src="assets/js/store.js"></script>
+<script src="assets/js/demo.js"></script>
+<script src="assets/js/views.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
