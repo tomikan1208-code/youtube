@@ -16,6 +16,7 @@
       q: '',
       music: true,
       shorts: true,
+      quick: true,
       dedupe: 300000
     }
   };
@@ -230,6 +231,7 @@
     f.q = el.search.value;
     f.music = el.music.checked;
     f.shorts = el.shorts.checked;
+    f.quick = el.quick.checked;
     f.dedupe = Number(el.dedupe.value);
     el.custom.hidden = f.range !== 'custom';
   }
@@ -238,7 +240,7 @@
     var b = rangeBounds();
     var f = state.filters;
     var filtered = Analytics.filter(state.events, {
-      from: b.from, to: b.to, q: f.q, music: f.music, shorts: f.shorts
+      from: b.from, to: b.to, q: f.q, music: f.music, shorts: f.shorts, quick: f.quick
     });
     var deduped = Analytics.dedupe(filtered, f.dedupe);
     state.analysis = Analytics.analyze(deduped);
@@ -271,6 +273,7 @@
     el.dedupe.addEventListener('change', onChange);
     el.music.addEventListener('change', onChange);
     el.shorts.addEventListener('change', onChange);
+    el.quick.addEventListener('change', onChange);
     el.search.addEventListener('input', onChangeDebounced);
   }
 
@@ -378,6 +381,9 @@
       span = U.fmtMonth(U.monthKey(state.events[0].t)) + '〜' +
              U.fmtMonth(U.monthKey(state.events[state.events.length - 1].t)) + '・';
     }
+    // 間隔は絞り込む前の全期間の並びで測る（読み込んだ直後に 1 回だけ）
+    Analytics.markGaps(state.events);
+
     el.source.textContent = span + U.int(state.events.length) + ' 件';
     el.source.title = buildSourceTooltip();
 
@@ -433,6 +439,7 @@
       dedupe: U.$('#f-dedupe'),
       music: U.$('#f-music'),
       shorts: U.$('#f-shorts'),
+      quick: U.$('#f-quick'),
       summary: U.$('#filter-summary'),
       tabs: U.$('#tabs'),
       view: U.$('#view'),

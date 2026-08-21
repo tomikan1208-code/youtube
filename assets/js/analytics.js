@@ -4,6 +4,26 @@
 
   var A = {};
 
+  /* ---------------- 再生の長さ ---------------- */
+
+  // 履歴に視聴時間は入っていない。代わりに「次の再生までの間隔」を使うと、
+  // スワイプで飛ばした再生や、開いてすぐ閉じた再生をだいたい見分けられる。
+  // これ以下なら「すぐ次へ移った」とみなす。
+  A.QUICK_MS = 20000;
+
+  /**
+   * 各イベントに gapNext（次の再生までのミリ秒）を入れる。
+   * 絞り込む前の全期間の並びで測る必要があるので、読み込んだ直後に 1 回だけ呼ぶ。
+   * events は時刻の昇順に並んでいること。
+   */
+  A.markGaps = function (events) {
+    for (var i = 0; i < events.length; i++) {
+      // 最後の 1 件は次が無いので測れない。除外されないよう Infinity にする。
+      events[i].gapNext = i + 1 < events.length ? events[i + 1].t - events[i].t : Infinity;
+    }
+    return events;
+  };
+
   /* ---------------- 絞り込み ---------------- */
 
   A.filter = function (events, opt) {
@@ -17,6 +37,7 @@
       if (e.t < from || e.t > to) continue;
       if (!opt.music && e.music) continue;
       if (!opt.shorts && e.shorts) continue;
+      if (!opt.quick && e.gapNext <= A.QUICK_MS) continue;
       if (q) {
         var hay = e.title.toLowerCase() + ' ' + (e.ch ? e.ch.toLowerCase() : '');
         if (hay.indexOf(q) < 0) continue;
